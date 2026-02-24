@@ -51,8 +51,8 @@ allprojects {
 sonarqube {
     properties {
         // Configurazione globale del progetto Sonar
-        property "sonar.projectKey", "HBaseConnector"
-        property "sonar.projectName", "HBaseConnector"
+        property "sonar.projectKey", "water.HBaseConnector"
+        property "sonar.projectName", "water.HBaseConnector"
         property "sonar.projectVersion", project.waterVersion
 
         // Includes all folder and sources for submodules
@@ -71,7 +71,6 @@ sonarqube {
 
 task jacocoRootReport(type: JacocoReport) {
     dependsOn subprojects.test
-    dependsOn subprojects.jacocoTestReport
     additionalSourceDirs.setFrom(files(subprojects.sourceSets.main.allSource.srcDirs))
     classDirectories.setFrom(
             files(subprojects.collect { project ->
