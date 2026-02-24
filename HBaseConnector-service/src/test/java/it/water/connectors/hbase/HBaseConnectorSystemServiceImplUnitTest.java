@@ -5,16 +5,7 @@ import it.water.connectors.hbase.service.HBaseConnectorSystemServiceImpl;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.client.Admin;
-import org.apache.hadoop.hbase.client.Connection;
-import org.apache.hadoop.hbase.client.ConnectionFactory;
-import org.apache.hadoop.hbase.client.Delete;
-import org.apache.hadoop.hbase.client.HBaseAdmin;
-import org.apache.hadoop.hbase.client.Put;
-import org.apache.hadoop.hbase.client.Result;
-import org.apache.hadoop.hbase.client.ResultScanner;
-import org.apache.hadoop.hbase.client.Scan;
-import org.apache.hadoop.hbase.client.Table;
+import org.apache.hadoop.hbase.client.*;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -26,35 +17,18 @@ import org.mockito.quality.Strictness;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.lenient;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.mockStatic;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -157,7 +131,7 @@ class HBaseConnectorSystemServiceImplUnitTest {
         systemService.createTable("table1", Arrays.asList("cf1", "cf2"));
         systemService.createTableAsync("table2", Collections.singletonList("cf1"));
 
-        verify(admin).createTable(any(org.apache.hadoop.hbase.HTableDescriptor.class));
+        verify(admin).createTable(any(TableDescriptor.class));
         verify(threadPool).execute(any(Runnable.class));
     }
 
@@ -372,13 +346,14 @@ class HBaseConnectorSystemServiceImplUnitTest {
             when(mockedConnection.getAdmin()).thenReturn(mockedAdmin);
 
             freshService.activate();
-            long timeout = System.currentTimeMillis() + 2000;
-            while (System.currentTimeMillis() < timeout) {
-                if (getField(freshService, "connection") != null && getField(freshService, "admin") != null) {
-                    break;
+            awaitCondition(() -> {
+                try {
+                    Object value = getField(freshService, "maxScanPageSize");
+                    return value instanceof Integer && ((Integer) value) == 100;
+                } catch (Exception e) {
+                    return false;
                 }
-                Thread.sleep(50);
-            }
+            }, 5, TimeUnit.SECONDS);
 
             assertNotNull(getField(freshService, "configuration"));
             assertNotNull(getField(freshService, "hbaseThreadPool"));
@@ -416,7 +391,13 @@ class HBaseConnectorSystemServiceImplUnitTest {
             connectionFactory.when(() -> ConnectionFactory.createConnection(conf)).thenThrow(new IOException("connection-refused"));
 
             assertDoesNotThrow(freshService::activate);
-            Thread.sleep(200);
+            awaitCondition(() -> {
+                try {
+                    return getField(freshService, "configuration") != null;
+                } catch (Exception e) {
+                    return false;
+                }
+            }, 2, TimeUnit.SECONDS);
 
             Object pool = getField(freshService, "hbaseThreadPool");
             assertNotNull(pool);
@@ -468,5 +449,16 @@ class HBaseConnectorSystemServiceImplUnitTest {
             }
         }
         throw new NoSuchFieldException(fieldName);
+    }
+
+    private static void awaitCondition(BooleanSupplier condition, long timeout, TimeUnit unit) throws InterruptedException {
+        long deadline = System.nanoTime() + unit.toNanos(timeout);
+        while (System.nanoTime() < deadline) {
+            if (condition.getAsBoolean()) {
+                return;
+            }
+            Thread.yield();
+        }
+        fail("Condition not met within timeout");
     }
 }

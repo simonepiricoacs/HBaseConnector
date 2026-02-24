@@ -11,30 +11,15 @@ import it.water.core.service.BaseSystemServiceImpl;
 import lombok.Setter;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseConfiguration;
-import org.apache.hadoop.hbase.HColumnDescriptor;
-import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.client.Admin;
-import org.apache.hadoop.hbase.client.Connection;
-import org.apache.hadoop.hbase.client.ConnectionFactory;
-import org.apache.hadoop.hbase.client.Delete;
-import org.apache.hadoop.hbase.client.HBaseAdmin;
-import org.apache.hadoop.hbase.client.Put;
-import org.apache.hadoop.hbase.client.Result;
-import org.apache.hadoop.hbase.client.ResultScanner;
-import org.apache.hadoop.hbase.client.Scan;
-import org.apache.hadoop.hbase.client.Table;
+import org.apache.hadoop.hbase.client.*;
 import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.filter.FilterList;
 import org.apache.hadoop.hbase.security.provider.SimpleSaslAuthenticationProvider;
 import org.apache.hadoop.hbase.util.Bytes;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -139,10 +124,14 @@ public class HBaseConnectorSystemServiceImpl extends BaseSystemServiceImpl imple
     public void createTable(String tableName, List<String> columnFamilies) {
         Runnable r = () -> {
             TableName table = TableName.valueOf(tableName);
-            HTableDescriptor descriptor = new HTableDescriptor(table);
-            columnFamilies.forEach(columnFamily -> descriptor.addFamily(new HColumnDescriptor(columnFamily)));
+            TableDescriptorBuilder tableDescriptorBuilder = TableDescriptorBuilder.newBuilder(table);
+            columnFamilies.forEach(columnFamily ->
+                tableDescriptorBuilder.setColumnFamily(
+                    ColumnFamilyDescriptorBuilder.newBuilder(Bytes.toBytes(columnFamily)).build()
+                )
+            );
             try {
-                admin.createTable(descriptor);
+                admin.createTable(tableDescriptorBuilder.build());
             } catch (IOException e) {
                 HBaseConnectorSystemServiceImpl.this.getLog().error(e.getMessage(), e);
             }
@@ -245,7 +234,7 @@ public class HBaseConnectorSystemServiceImpl extends BaseSystemServiceImpl imple
             try {
                 Table table = connection.getTable(TableName.valueOf(tableName));
                 Put put = new Put(rowKey.getBytes());
-                put.addImmutable(columnFamily.getBytes(), column.getBytes(), cellValue.getBytes());
+                put.addColumn(columnFamily.getBytes(), column.getBytes(), cellValue.getBytes());
                 table.put(put);
                 table.close();
             } catch (IOException e) {
@@ -260,6 +249,17 @@ public class HBaseConnectorSystemServiceImpl extends BaseSystemServiceImpl imple
         this.executeTask(() -> insertData(tableName, rowKey, columnFamily, column, cellValue));
     }
 
+    /**
+     * @deprecated
+     *
+     * @param tableName
+     * @param columns
+     * @param rowKeyLowerBound
+     * @param rowKeyUpperBound
+     * @param limit
+     * @return
+     * @throws IOException
+     */
     @Deprecated
     public ResultScanner getScanner(
         String tableName,
@@ -288,19 +288,26 @@ public class HBaseConnectorSystemServiceImpl extends BaseSystemServiceImpl imple
         if (rowKeyUpperBound != null && rowKeyUpperBound.length > 0) {
             scan.withStopRow(rowKeyUpperBound, true);
         }
-
         getLog().debug("Querying HBase with limit: {}", limit);
-        int maxResults = limit > 0 && limit <= maxScanPageSize ? limit : (limit <= 0 ? -1 : maxScanPageSize);
+        int maxResults = 0;
+        if (limit > 0 && limit <= maxScanPageSize)
+            maxResults = limit;
+        else if (limit <= 0)
+            maxResults = -1;
+        else maxResults = maxScanPageSize;
         getLog().debug("HBase scan limit: {}", maxResults);
         if (maxResults > 0) {
             scan.setLimit(maxResults);
         }
 
-        for (byte[] columnFamily : columns.keySet()) {
-            if (columns.get(columnFamily) == null || columns.get(columnFamily).isEmpty()) {
+        for (Map.Entry<byte[], List<byte[]>> entry : columns.entrySet()) {
+            byte[] columnFamily = entry.getKey();
+            List<byte[]> columnList = entry.getValue();
+
+            if (columnList == null || columnList.isEmpty()) {
                 scan.addFamily(columnFamily);
             } else {
-                for (byte[] column : columns.get(columnFamily)) {
+                for (byte[] column : columnList) {
                     scan.addColumn(columnFamily, column);
                 }
             }
@@ -328,25 +335,23 @@ public class HBaseConnectorSystemServiceImpl extends BaseSystemServiceImpl imple
     }
 
     @Override
-    public long rowCount(String tableName, Map<byte[], List<byte[]>> columns, byte[] rowKeyLowerBound, byte[] rowKeyUpperBound)
-        throws Throwable {
+    public long rowCount(String tableName, Map<byte[], List<byte[]>> columns, byte[] rowKeyLowerBound, byte[] rowKeyUpperBound) {
         AtomicLong counter = new AtomicLong();
-        scanResults(tableName, columns, rowKeyLowerBound, rowKeyUpperBound, -1, result -> {
-            counter.set(counter.addAndGet(result.listCells().size()));
-        });
+        scanResults(tableName, columns, rowKeyLowerBound, rowKeyUpperBound, -1, result ->
+            counter.set(counter.addAndGet(result.listCells().size()))
+        );
         return counter.longValue();
     }
 
     @Override
-    public List<byte[]> scan(String tableName, byte[] columnFamily, byte[] column, byte[] rowKeyLowerBound, byte[] rowKeyUpperBound)
-        throws IOException {
+    public List<byte[]> scan(String tableName, byte[] columnFamily, byte[] column, byte[] rowKeyLowerBound, byte[] rowKeyUpperBound) {
         Map<byte[], List<byte[]>> columns = new HashMap<>();
         columns.put(columnFamily, new ArrayList<>());
         columns.get(columnFamily).add(column);
         List<byte[]> cells = new ArrayList<>();
-        scanResults(tableName, columns, rowKeyLowerBound, rowKeyUpperBound, 0, result -> {
-            cells.add(result.getValue(columnFamily, column));
-        });
+        scanResults(tableName, columns, rowKeyLowerBound, rowKeyUpperBound, 0, result ->
+            cells.add(result.getValue(columnFamily, column))
+        );
         return cells;
     }
 
@@ -356,7 +361,7 @@ public class HBaseConnectorSystemServiceImpl extends BaseSystemServiceImpl imple
         byte[] rowKeyLowerBound,
         byte[] rowKeyUpperBound,
         int limit
-    ) throws IOException {
+    ) {
         List<Result> results = new ArrayList<>();
         scanResults(tableName, columns, rowKeyLowerBound, rowKeyUpperBound, limit, results::add);
         return results;
@@ -369,24 +374,29 @@ public class HBaseConnectorSystemServiceImpl extends BaseSystemServiceImpl imple
         byte[] rowKeyLowerBound,
         byte[] rowKeyUpperBound,
         int limit
-    ) throws IOException {
+    ) {
         Map<byte[], Map<byte[], Map<byte[], byte[]>>> output = new HashMap<>();
         scanResults(tableName, columns, rowKeyLowerBound, rowKeyUpperBound, limit, result -> {
-            output.put(result.getRow(), new HashMap<>());
-            for (byte[] columnFamily : columns.keySet()) {
-                output.get(result.getRow()).put(columnFamily, new HashMap<>());
-                List<byte[]> requestedColumns = columns.get(columnFamily);
+            byte[] rowKey = result.getRow();
+            Map<byte[], Map<byte[], byte[]>> rowMap = new HashMap<>();
+            output.put(rowKey, rowMap);
+            for (Map.Entry<byte[], List<byte[]>> entry : columns.entrySet()) {
+                byte[] columnFamily = entry.getKey();
+                List<byte[]> requestedColumns = entry.getValue();
+                Map<byte[], byte[]> familyMap = new HashMap<>();
+                rowMap.put(columnFamily, familyMap);
                 if (requestedColumns == null) {
                     continue;
                 }
                 for (byte[] column : requestedColumns) {
                     byte[] value = result.getValue(columnFamily, column);
                     if (value != null) {
-                        output.get(result.getRow()).get(columnFamily).put(column, value);
+                        familyMap.put(column, value);
                     }
                 }
             }
         });
+
         return output;
     }
 
@@ -417,7 +427,7 @@ public class HBaseConnectorSystemServiceImpl extends BaseSystemServiceImpl imple
     }
 
     @Override
-    public boolean tableExists(String tableName) throws IOException {
+    public boolean tableExists(String tableName) {
         AtomicBoolean exists = new AtomicBoolean(false);
         Runnable r = () -> {
             try {
